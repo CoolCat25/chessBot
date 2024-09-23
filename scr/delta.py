@@ -109,7 +109,7 @@ def white_knight_moves(board):
             temp_knight.append(full_names[temp[i]] + full_names[temp[i]-10])
         if full_names[temp[i]][0] != "g" and full_names[temp[i]][0] != "h" and full_names[temp[i]][1] != "1" and board[temp[i] - 6] == " " or board[temp[i] - 6] in pieces_black:
             temp_knight.append(full_names[temp[i]] + full_names[temp[i] - 6])
-    return temp_knight
+    return temp_knight #knight
 move_piece(1, 16)
 print_board(currentboard)
 print(white_knight_moves(currentboard))
