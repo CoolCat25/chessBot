@@ -116,31 +116,31 @@ def white_bishop_moves(board):
     temp_bishop = []
     for i in range (len(temp)):
         for j in range (1,8):
-            if full_names[temp[i]+(j*8)+j][0] != "a" and board[temp[i]+(j*8)+j] == " " or board[temp[i]+(j*8)+j] in pieces_black:
-                if board[temp[i]+(j*8)+j] in pieces_black:
-                    temp_bishop.append(full_names[temp[i]] + full_names[temp[i] + (j * 8) + j])
+            if full_names[temp[i]+(j*9)][0] != "a" and board[temp[i]+(j*9)] == " " or board[temp[i]+(j*9)] in pieces_black:
+                if board[temp[i]+(j*9)] in pieces_black:
+                    temp_bishop.append(full_names[temp[i]] + full_names[temp[i] + (j * 9)])
                     break
                 else:
-                    temp_bishop.append(full_names[temp[i]] + full_names[temp[i]+(j*8)+j])
+                    temp_bishop.append(full_names[temp[i]] + full_names[temp[i]+(j*9)])
             else:
                 break
         for j in range (1,8):
-            if  board[temp[i]+(j*8)-j] == " " or board[temp[i]+(j*8)-j] in pieces_black:
-                if board[temp[i]+(j*8)-j] in pieces_black:
-                    temp_bishop.append(full_names[temp[i]] + full_names[temp[i] + (j * 8) - j]) #horrible code right here, will fix eventually
+            if  board[temp[i]+(j*7)] == " " or board[temp[i]+(j*7)] in pieces_black:
+                if board[temp[i]+(j*7)] in pieces_black:
+                    temp_bishop.append(full_names[temp[i]] + full_names[temp[i] + (j * 7)]) #horrible code right here, will fix eventually
                     break
                 else:
-                    temp_bishop.append(full_names[temp[i]] + full_names[temp[i]+(j*8)-j])
+                    temp_bishop.append(full_names[temp[i]] + full_names[temp[i]+(j*7)])
             else:
                 break
 
         for j in range (1,8):
-            if board[temp[i]+(j*-8)-j] == " " or board[temp[i]+(j*-8)-j] in pieces_black:
-                if board[temp[i]+(j*8)-j] in pieces_black:
-                    temp_bishop.append(full_names[temp[i]] + full_names[temp[i] + (j * -8) - j])
+            if board[temp[i]+(j*-9)] == " " or board[temp[i]+(j*-9)] in pieces_black:
+                if board[temp[i]+(j*-9)] in pieces_black:
+                    temp_bishop.append(full_names[temp[i]] + full_names[temp[i] + (j * -9)])
                     break
                 else:
-                    temp_bishop.append(full_names[temp[i]] + full_names[temp[i]+(j*-8)-j])
+                    temp_bishop.append(full_names[temp[i]] + full_names[temp[i]+(j*-9)])
             else:
                 break
 
