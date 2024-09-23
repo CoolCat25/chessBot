@@ -85,7 +85,7 @@ def white_pawn_moves(board):
     return temp_pawn
 
 
-#calculates white knight moves - to fix - the knight can move off the left and right of the board
+
 def white_knight_moves(board):
     temp = []
     for i in range (64):
@@ -99,14 +99,20 @@ def white_knight_moves(board):
             temp_knight.append(full_names[temp[i]] + full_names[temp[i]+17])
         if full_names[temp[i]][0] != "h" and full_names[temp[i]][1] != "1" and full_names[temp[i]][1] != "2" and board[temp[i]-15] == " " or board[temp[i]-15] in pieces_black:
             temp_knight.append(full_names[temp[i]] + full_names[temp[i]-15])
-        if full_names[temp[i]][0] != "a" and full_names[temp[i]][1] != "8" and full_names[temp[i]][1] != "7" and board[temp[i]-17] == " " or board[temp[i]-17] in pieces_black:
+        if full_names[temp[i]][0] != "a" and full_names[temp[i]][1] != "1" and full_names[temp[i]][1] != "2" and board[temp[i]-17] == " " or board[temp[i]-17] in pieces_black:
             temp_knight.append(full_names[temp[i]] + full_names[temp[i]-17])
-        if full_names[temp[i]][0] != "g" and full_names[temp[i]][0] != "h" and board[temp[i]+10] == " " or board[temp[i]+10] in pieces_black:
+        if full_names[temp[i]][0] != "g" and full_names[temp[i]][0] != "h" and full_names[temp[i]][1] != "8" and board[temp[i]+10] == " " or board[temp[i]+10] in pieces_black:
             temp_knight.append(full_names[temp[i]] + full_names[temp[i]+10])
-        if full_names[temp[i]][0] != "a" and full_names[temp[i]][0] != "b" and board[temp[i] + 6] == " " or board[temp[i] + 6] in pieces_black:
+        if full_names[temp[i]][0] != "a" and full_names[temp[i]][0] != "b" and full_names[temp[i]][1] != "8" and board[temp[i] + 6] == " " or board[temp[i] + 6] in pieces_black:
             temp_knight.append(full_names[temp[i]] + full_names[temp[i] + 6])
+        if full_names[temp[i]][0] != "a" and full_names[temp[i]][0] != "b" and full_names[temp[i]][1] != "1" and board[temp[i]-10] == " " or board[temp[i]-10] in pieces_black:
+            temp_knight.append(full_names[temp[i]] + full_names[temp[i]-10])
+        if full_names[temp[i]][0] != "g" and full_names[temp[i]][0] != "h" and full_names[temp[i]][1] != "1" and board[temp[i] - 6] == " " or board[temp[i] - 6] in pieces_black:
+            temp_knight.append(full_names[temp[i]] + full_names[temp[i] - 6])
     return temp_knight
-
+move_piece(1, 16)
+print_board(currentboard)
+print(white_knight_moves(currentboard))
 #completely broken :) needs fixing: moving across the sides of the board
 def white_bishop_moves(board):
     temp = []
