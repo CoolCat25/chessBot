@@ -113,7 +113,7 @@ def white_knight_moves(board):
 move_piece(1, 16)
 print_board(currentboard)
 print(white_knight_moves(currentboard))
-#completely broken :) needs fixing: moving across the sides of the board
+#completely broken :) needs fixing - moving across the sides of the board
 def white_bishop_moves(board):
     temp = []
     for i in range (64):
