@@ -12,16 +12,30 @@ import time
 from tqdm import tqdm
 from datetime import datetime
 active_games = {}  # Track game_id: {color, last_fen}
+API_TOKEN = "lip_CpEAd1KdD5ypRmRUc3Q8"
+session = berserk.TokenSession(API_TOKEN)  # Increased timeout
+client = berserk.Client(session=session)
+try:
+    account_info = client.account.get()
+    print(f"Connected as {account_info['username']}")
+except berserk.exceptions.ResponseError as e:
+    print(f"Token validation failed: {e}")
+    exit(1)
+
 
 # --- Load Move Vocabulary ---
+# Load the comprehensive move vocabulary
 def load_move_vocab(vocab_path="move_vocab.json"):
     with open(vocab_path, "r") as f:
         move_vocab = json.load(f)
-    # Create an inverted dictionary: index -> move
     inv_move_vocab = {int(v): k for k, v in move_vocab.items()}
     return move_vocab, inv_move_vocab
 
 move_vocab, inv_move_vocab = load_move_vocab("move_vocab.json")
+num_moves = len(move_vocab)
+
+# Initialize model with the correct number of moves
+
 
 # --- Bot and Engine Model Code ---
 
@@ -98,15 +112,7 @@ def board_to_tensor(board):
     return tensor
 
 # --- Berserk Lichess Bot API Integration ---
-API_TOKEN = "lip_EOHv3N2UZkwTJZFO4RKs"
-session = berserk.TokenSession(API_TOKEN)  # Increased timeout
-client = berserk.Client(session=session)
-try:
-    account_info = client.account.get()
-    print(f"Connected as {account_info['username']}")
-except berserk.exceptions.ResponseError as e:
-    print(f"Token validation failed: {e}")
-    exit(1)
+
 # --- Neural Network Helper Functions ---
 
 def load_model(model_path, num_moves):
@@ -221,46 +227,36 @@ class GameHandler(threading.Thread):
 
     def should_move(self):
         """Check if it's our turn to move (FIXED)"""
-        print("shouldmovecalled")
         # Convert 'white'/'black' to chess.WHITE/chess.BLACK comparison
         return (self.color == 'white' and self.board.turn == chess.WHITE) or \
             (self.color == 'black' and self.board.turn == chess.BLACK)
 
     def choose_move(self):
-        """Neural network move selection with legal move masking"""
-        # Convert board to tensor
         state_np = board_to_tensor(self.board)
         state_tensor = torch.from_numpy(state_np).unsqueeze(0).float().to(device)
 
-        # Get legal moves
-        legal_moves = {move.uci() for move in self.board.legal_moves}
+        legal_moves = [move.uci() for move in self.board.legal_moves]
         legal_indices = [move_vocab[m] for m in legal_moves if m in move_vocab]
+
+        if not legal_indices:
+            return self.random_legal_move()
 
         with torch.no_grad():
             outputs = model(state_tensor)
-
-            # Create legal moves mask
             mask = torch.ones_like(outputs) * float('-inf')
-            if legal_indices:
-                mask[:, legal_indices] = 0
-
-            # Apply mask and get probabilities
+            mask[:, legal_indices] = 0
             masked_outputs = outputs + mask
-            probs = torch.softmax(masked_outputs, dim=1)
 
-            # Sample from legal moves using probabilities
-            if legal_indices:
-                move_idx = torch.multinomial(probs, 1).item()
-            else:
-                return self.random_legal_move()  # Fallback if no valid moves
+            # Apply temperature (e.g., 0.5 for more exploration)
+            temperature = 0.5
+            probs = torch.softmax(masked_outputs / temperature, dim=1)
+            move_idx = torch.multinomial(probs, 1).item()
 
         uci_move = inv_move_vocab.get(move_idx, '0000')
 
-        # Final validation
         if uci_move in legal_moves:
             return uci_move
         return self.random_legal_move()
-
     def random_legal_move(self):
         print("random move")
         """Fallback move selection with safety checks"""
