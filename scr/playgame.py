@@ -1,332 +1,451 @@
-import datetime
-import json
-import threading
-
 import berserk
-import torch
-import torch.nn as nn
-import torch.optim as optim
 import chess
-import numpy as np
 import time
-from tqdm import tqdm
-from datetime import datetime
-active_games = {}  # Track game_id: {color, last_fen}
-API_TOKEN = "lip_CpEAd1KdD5ypRmRUc3Q8"
-session = berserk.TokenSession(API_TOKEN)  # Increased timeout
+import signal
+import sys
+import logging
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+# Configure logging
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Initialize the session with your API token
+API_TOKEN = "lip_CpEAd1KdD5ypRmRUc3Q8"  # Replace this token with an environment variable or config
+session = berserk.TokenSession(API_TOKEN)
+
+# Define your retry strategy
+retry_strategy = Retry(
+    total=3,              # Total number of retries
+    backoff_factor=0.1,   # Backoff factor between attempts
+    allowed_methods=frozenset(['GET', 'POST']),  # Methods to retry
+    status_forcelist=[500, 502, 503, 504],         # HTTP status codes to retry
+    raise_on_redirect=True,
+    raise_on_status=True
+)
+
+adapter = HTTPAdapter(max_retries=retry_strategy)
+session.mount("https://", adapter)
+session.mount("http://", adapter)
+
 client = berserk.Client(session=session)
-try:
-    account_info = client.account.get()
-    print(f"Connected as {account_info['username']}")
-except berserk.exceptions.ResponseError as e:
-    print(f"Token validation failed: {e}")
-    exit(1)
 
-
-# --- Load Move Vocabulary ---
-# Load the comprehensive move vocabulary
-def load_move_vocab(vocab_path="move_vocab.json"):
-    with open(vocab_path, "r") as f:
-        move_vocab = json.load(f)
-    inv_move_vocab = {int(v): k for k, v in move_vocab.items()}
-    return move_vocab, inv_move_vocab
-
-move_vocab, inv_move_vocab = load_move_vocab("move_vocab.json")
-num_moves = len(move_vocab)
-
-# Initialize model with the correct number of moves
-
-
-# --- Bot and Engine Model Code ---
-
-class SEBlock(nn.Module):
-    def __init__(self, channels, reduction=16):
-        super(SEBlock, self).__init__()
-        self.fc = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
-            nn.Conv2d(channels, channels // reduction, kernel_size=1),
-            nn.ReLU(),
-            nn.Conv2d(channels // reduction, channels, kernel_size=1),
-            nn.Sigmoid()
-        )
-    def forward(self, x):
-        scale = self.fc(x)
-        return x * scale
-
-class ResNetBlock(nn.Module):
-    def __init__(self, channels):
-        super(ResNetBlock, self).__init__()
-        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
-        self.relu = nn.ReLU()
-        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
-        self.se = SEBlock(channels)
-    def forward(self, x):
-        residual = x
-        out = self.conv1(x)
-        out = self.relu(out)
-        out = self.conv2(out)
-        out = self.se(out)
-        return self.relu(out + residual)
-
-class ChessResNet(nn.Module):
-    def __init__(self, num_moves):
-        super(ChessResNet, self).__init__()
-        self.conv1 = nn.Conv2d(17, 64, kernel_size=3, padding=1)
-        self.res_blocks = nn.Sequential(
-            ResNetBlock(64),
-            ResNetBlock(64),
-            ResNetBlock(64)
-        )
-        self.flatten = nn.Flatten()
-        self.fc_layers = nn.Sequential(
-            nn.Linear(64 * 8 * 8, 512),
-            nn.ReLU(),
-            nn.Linear(512, num_moves)
-        )
-    def forward(self, x):
-        x = self.conv1(x)
-        x = self.res_blocks(x)
-        x = self.flatten(x)
-        x = self.fc_layers(x)
-        return x
-
-piece_to_channel = {
-    'P': 0, 'N': 1, 'B': 2, 'R': 3, 'Q': 4, 'K': 5,
-    'p': 6, 'n': 7, 'b': 8, 'r': 9, 'q': 10, 'k': 11,
+# Piece values for evaluation
+piece_values = {
+    'P': 1, 'N': 3, 'B': 3, 'R': 5, 'Q': 9, 'K': 0,
+    'p': -1, 'n': -3, 'b': -3, 'r': -5, 'q': -9, 'k': 0,
 }
 
-def board_to_tensor(board):
-    tensor = np.zeros((17, 8, 8), dtype=np.float32)
+# Piece-Square Tables (values in centipawns)
+
+# White Piece-Square Tables
+pawn_pst_white = [
+    [0,   0,   0,   0,   0,   0,   0,  0],
+    [1,   1,   1,   1,   1,   1,   1,  1],
+    [0.2, 0.2, 0.4, 0.6, 0.6, 0.4, 0.2, 0.2],
+    [0.1, 0.1, 0.2, 0.5, 0.5, 0.2, 0.1, 0.1],
+    [0,   0,   0,   0.4, 0.4, 0,   0,   0],
+    [0.1, -0.1,-0.2, 0,   0,  -0.2,-0.1, 0.1],
+    [0.1, 0.2, 0.2, -0.4,-0.4, 0.2, 0.2, 0.1],
+    [0,   0,   0,   0,   0,   0,   0,   0]
+]
+
+knight_pst_white = [
+    [-1,   -0.8, -0.6, -0.6, -0.6, -0.6, -0.8, -1],
+    [-0.8, -0.4,  0,    0.1,  0.1,  0,   -0.4, -0.8],
+    [-0.6,  0.1,  0.2,  0.3,  0.3,  0.2,  0.1, -0.6],
+    [-0.6,  0,    0.3,  0.4,  0.4,  0.3,  0,   -0.6],
+    [-0.6,  0.1,  0.3,  0.4,  0.4,  0.3,  0.1, -0.6],
+    [-0.6,  0,    0.2,  0.3,  0.3,  0.2,  0,   -0.6],
+    [-0.8, -0.4,  0,    0,    0,    0,   -0.4, -0.8],
+    [-1,   -0.8, -0.6, -0.6, -0.6, -0.6, -0.8, -1]
+]
+
+bishop_pst_white = [
+    [-0.4, -0.2, -0.2, -0.2, -0.2, -0.2, -0.2, -0.4],
+    [-0.2, 0.1,  0.2,  0.2,  0.2,  0.2,  0.1, -0.2],
+    [-0.2, 0.2,  0.4,  0.4,  0.4,  0.4,  0.2, -0.2],
+    [-0.2, 0.2,  0.4,  0.6,  0.6,  0.4,  0.2, -0.2],
+    [-0.2, 0.2,  0.4,  0.6,  0.6,  0.4,  0.2, -0.2],
+    [-0.2, 0.2,  0.4,  0.4,  0.4,  0.4,  0.2, -0.2],
+    [-0.2, 0.1,  0.2,  0.2,  0.2,  0.2,  0.1, -0.2],
+    [-0.4, -0.2, -0.2, -0.2, -0.2, -0.2, -0.2, -0.4]
+]
+
+rook_pst_white = [
+    [0,    0,    0,    0.1,  0.1,  0,    0,   0],
+    [0.2,  0.2,  0.2,  0.2,  0.2,  0.2,  0.2, 0.2],
+    [-0.1, 0,    0,    0,    0,    0,    0,  -0.1],
+    [-0.1, 0,    0.1,  0.1,  0.1,  0.1,  0,  -0.1],
+    [-0.1, 0,    0.1,  0.1,  0.1,  0.1,  0,  -0.1],
+    [-0.1, 0,    0,    0,    0,    0,    0,  -0.1],
+    [0.2,  0.2,  0.2,  0.2,  0.2,  0.2,  0.2, 0.2],
+    [0,    0,    0,    0.1,  0.1,  0,    0,   0]
+]
+
+queen_pst_white = [
+    [-0.004, -0.002, -0.002, -0.01, -0.01, -0.002, -0.002, -0.004],
+    [-0.2,    0,      0.1,    0.1,   0.1,   0.1,    0,     -0.2],
+    [-0.2,    0.1,    0.2,    0.2,   0.2,   0.2,    0.1,   -0.2],
+    [-0.1,    0.1,    0.2,    0.3,   0.3,   0.2,    0.1,   -0.1],
+    [-0.1,    0.1,    0.2,    0.3,   0.3,   0.2,    0.1,   -0.1],
+    [-0.2,    0.1,    0.2,    0.2,   0.2,   0.2,    0.1,   -0.2],
+    [-0.2,    0,      0.1,    0.1,   0.1,   0.1,    0,     -0.2],
+    [-0.004, -0.002, -0.002, -0.01, -0.01, -0.002, -0.002, -0.004]
+]
+
+king_pst_white = [
+    [-0.4, -0.2, -0.2, -0.2, -0.2, -0.2, -0.2, -0.4],
+    [-0.2, 0,    0.1,  0.1,  0.1,  0.1,  0,   -0.2],
+    [-0.2, 0.1,  0.2,  0.3,  0.3,  0.2,  0.1, -0.2],
+    [-0.2, 0.1,  0.3,  0.4,  0.4,  0.3,  0.1, -0.2],
+    [-0.2, 0.1,  0.3,  0.4,  0.4,  0.3,  0.1, -0.2],
+    [-0.2, 0.1,  0.2,  0.3,  0.3,  0.2,  0.1, -0.2],
+    [-0.2, 0,    0.1,  0.1,  0.1,  0.1,  0,   -0.2],
+    [-0.4, -0.2, -0.2, -0.2, -0.2, -0.2, -0.2, -0.4]
+]
+# Black Piece-Square Tables
+# Black Piece-Square Tables (Inverted)
+
+pawn_pst_black = [
+    [0,   0,   0,   0,   0,   0,   0,   0],
+    [-0.1, -0.2, -0.2, 0.4, 0.4, -0.2, -0.2, -0.1],
+    [-0.1, 0.1, 0.2, 0, 0, 0.2, 0.1, -0.1],
+    [0,   0,   0,   -0.4, -0.4,  0,   0,   0],
+    [-0.1, -0.1, -0.2, -0.5, -0.5, -0.2, -0.1, -0.1],
+    [-0.2, -0.2, -0.4, -0.6, -0.6, -0.4, -0.2, -0.2],
+    [-1,  -1,  -1,  -1,  -1,  -1,  -1,  -1],
+    [0,   0,   0,   0,   0,   0,   0,   0]
+]
+
+knight_pst_black = [
+    [1, 0.8, 0.6, 0.6, 0.6, 0.6, 0.8, 1],
+    [0.8, 0.4, 0, 0, 0, 0, 0.4, 0.8],
+    [0.6, 0, -0.2, -0.3, -0.3, -0.2, 0, 0.6],
+    [0.6, -0.1, -0.3, -0.4, -0.4, -0.3, -0.1, 0.6],
+    [0.6, 0, -0.3, -0.4, -0.4, -0.3, 0, 0.6],
+    [0.6, -0.1, -0.2, -0.3, -0.3, -0.2, -0.1, 0.6],
+    [0.8, 0.4, 0, -0.1, -0.1, 0, 0.4, 0.8],
+    [1, 0.8, 0.6, 0.6, 0.6, 0.6, 0.8, 1]
+]
+
+bishop_pst_black = [
+    [0.4, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.4],
+    [0.2, -0.1, -0.2, -0.2, -0.2, -0.2, -0.1, 0.2],
+    [0.2, -0.2, -0.4, -0.4, -0.4, -0.4, -0.2, 0.2],
+    [0.2, -0.2, -0.4, -0.6, -0.6, -0.4, -0.2, 0.2],
+    [0.2, -0.2, -0.4, -0.6, -0.6, -0.4, -0.2, 0.2],
+    [0.2, -0.2, -0.4, -0.4, -0.4, -0.4, -0.2, 0.2],
+    [0.2, -0.1, -0.2, -0.2, -0.2, -0.2, -0.1, 0.2],
+    [0.4, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.4]
+]
+
+rook_pst_black = [
+    [0, 0, 0, -0.1, -0.1, 0, 0, 0],
+    [-0.2, -0.2, -0.2, -0.2, -0.2, -0.2, -0.2, -0.2],
+    [0.1, 0, 0, 0, 0, 0, 0, 0.1],
+    [0.1, 0, -0.1, -0.1, -0.1, -0.1, 0, 0.1],
+    [0.1, 0, -0.1, -0.1, -0.1, -0.1, 0, 0.1],
+    [0.1, 0, 0, 0, 0, 0, 0, 0.1],
+    [-0.2, -0.2, -0.2, -0.2, -0.2, -0.2, -0.2, -0.2],
+    [0, 0, 0, -0.1, -0.1, 0, 0, 0]
+]
+
+queen_pst_black = [
+    [0.004, 0.002, 0.002, 0.01, 0.01, 0.002, 0.002, 0.004],
+    [0.2, 0, -0.1, -0.1, -0.1, -0.1, 0, 0.2],
+    [0.2, -0.1, -0.2, -0.2, -0.2, -0.2, -0.1, 0.2],
+    [0.1, -0.1, -0.2, -0.3, -0.3, -0.2, -0.1, 0.1],
+    [0.1, -0.1, -0.2, -0.3, -0.3, -0.2, -0.1, 0.1],
+    [0.2, -0.1, -0.2, -0.2, -0.2, -0.2, -0.1, 0.2],
+    [0.2, 0, -0.1, -0.1, -0.1, -0.1, 0, 0.2],
+    [0.004, 0.002, 0.002, 0.01, 0.01, 0.002, 0.002, 0.004]
+]
+
+king_pst_black = [
+    [0.4, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.4],
+    [0.2, 0, -0.1, -0.1, -0.1, -0.1, 0, 0.2],
+    [0.2, -0.1, -0.2, -0.3, -0.3, -0.2, -0.1, 0.2],
+    [0.2, -0.1, -0.3, -0.4, -0.4, -0.3, -0.1, 0.2],
+    [0.2, -0.1, -0.3, -0.4, -0.4, -0.3, -0.1, 0.2],
+    [0.2, -0.1, -0.2, -0.3, -0.3, -0.2, -0.1, 0.2],
+    [0.2, 0, -0.1, -0.1, -0.1, -0.1, 0, 0.2],
+    [0.4, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.4]
+]
+
+
+piece_square_tables = {
+    'P': pawn_pst_white,
+    'N': knight_pst_white,
+    'B': bishop_pst_white,
+    'R': rook_pst_white,
+    'Q': queen_pst_white,
+    'K': king_pst_white,
+    'p': pawn_pst_black,
+    'n': knight_pst_black,
+    'b': bishop_pst_black,
+    'r': rook_pst_black,
+    'q': queen_pst_black,
+    'k': king_pst_black
+}
+
+def king_safety(board, king_square, color):
+    """
+    Evaluates the safety of the king based on pawn shields.
+    """
+    safety_score = 0
+    file = chess.square_file(king_square)
+    rank = chess.square_rank(king_square)
+
+    # Pawn shield evaluation parameters
+    pawn_shield_bonus = 0.5
+    pawn_penalty = -1  # Enemy pawn presence near the king is bad
+
+    # Evaluate adjacent pawns for pawn shield
+    for rank_offset in range(1, 3):  # Check up to two ranks ahead
+        for file_offset in [-1, 0, 1]:  # Check left, center, and right files
+            new_file = file + file_offset
+            new_rank = rank + (rank_offset if color == chess.WHITE else -rank_offset)
+            if 0 <= new_file < 8 and 0 <= new_rank < 8:
+                square = chess.square(new_file, new_rank)
+                piece = board.piece_at(square)
+                if piece:
+                    if piece.piece_type == chess.PAWN:
+                        if piece.color == color:
+                            safety_score += pawn_shield_bonus  # Own pawn is good
+                        else:
+                            safety_score += pawn_penalty  # Enemy pawn is bad
+
+    return safety_score
+
+
+def evaluate_pawn_structure(board, color):
+    """
+    Evaluates the pawn structure for weaknesses like doubled or isolated pawns.
+    """
+    score = 0
+    pawns = board.pieces(chess.PAWN, color)
+    pawn_files = [chess.square_file(p) for p in pawns]
+
+    # Penalize doubled pawns
+    for f in set(pawn_files):
+        count = pawn_files.count(f)
+        if count > 1:
+            score -= 1.5 * (count - 1)
+
+    # Penalize isolated pawns: check if adjacent files are missing any pawn
+    for f in pawn_files:
+        if (f - 1) not in pawn_files and (f + 1) not in pawn_files:
+            score -= 2
+
+    return score
+
+
+def evaluate_board(board, is_white):
+    """
+    Evaluates the board position and returns a score from the bot's perspective.
+    """
+    if board.is_checkmate():
+        return float('-inf') if board.turn == is_white else float('inf')
+    if board.is_stalemate() or board.is_insufficient_material():
+        return 0
+
+    material_score = 0
+    pos_score_white = 0
+    pos_score_black = 0
+    king_safety_score = 0
+    pawn_structure_score = 0
+
+    white_king_safety = 0
+    black_king_safety = 0
+
     for square in chess.SQUARES:
         piece = board.piece_at(square)
         if piece:
-            row = 7 - (square // 8)
-            col = square % 8
-            tensor[piece_to_channel[piece.symbol()], row, col] = 1.0
-    active_color = 1.0 if board.turn == chess.WHITE else 0.0
-    tensor[12, :, :] = active_color
-    tensor[13, :, :] = 1.0 if board.has_kingside_castling_rights(chess.WHITE) else 0.0
-    tensor[14, :, :] = 1.0 if board.has_queenside_castling_rights(chess.WHITE) else 0.0
-    tensor[15, :, :] = 1.0 if board.has_kingside_castling_rights(chess.BLACK) else 0.0
-    tensor[16, :, :] = 1.0 if board.has_queenside_castling_rights(chess.BLACK) else 0.0
-    return tensor
+            # Material value (already signed)
+            material_score += piece_values.get(piece.symbol(), 0)
 
-# --- Berserk Lichess Bot API Integration ---
-
-# --- Neural Network Helper Functions ---
-
-def load_model(model_path, num_moves):
-    model = ChessResNet(num_moves)
-    model.load_state_dict(torch.load(model_path))
-    model.eval()
-    return model
-
-def predict_move(model, board):
-    state_tensor = torch.tensor(board_to_tensor(board)).unsqueeze(0)
-    with torch.no_grad():
-        outputs = model(state_tensor)
-    predicted_move_idx = torch.argmax(outputs, dim=1).item()
-    print(f"Predicted move index: {predicted_move_idx}")
-    return predicted_move_idx
-
-def map_move(predicted_idx):
-    # Map the predicted index to a UCI move string using our inverted vocabulary.
-    move = inv_move_vocab.get(predicted_idx)
-    if move is None:
-        print(f"Warning: Predicted index {predicted_idx} not found in vocabulary. Using default move 'e2e4'.")
-        return "e2e4"
-    return move
-
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
-# --- Model Loading Fixes ---
-# Add this after loading the move_vocab
-move_vocab, inv_move_vocab = load_move_vocab("move_vocab.json")
-num_moves = len(move_vocab)
-
-# Initialize model with correct device and parameters
-model = ChessResNet(num_moves).to(device)
-model.load_state_dict(torch.load("chess_resnet_se.pth", map_location=device))
-model.eval()
-
-# --- Bot Infrastructure ---
-session = berserk.TokenSession(API_TOKEN)
-client = berserk.Client(session=session)
-
-
-class GameHandler(threading.Thread):
-    def __init__(self, game_id, color):
-        super().__init__()
-        self.game_id = game_id
-        self.color = color
-        self.board = chess.Board()
-        self.running = True
-
-    def run(self):
-        """Main game loop handling move responses"""
-        try:
-            stream = client.bots.stream_game_state(self.game_id)
-            for event in stream:
-                if not self.running:
-                    break
-
-                if event['type'] == 'gameFull':
-                    self.handle_game_full(event)
-                elif event['type'] == 'gameState':
-                    self.handle_game_state(event)
-        except Exception as e:
-            print(f"Game {self.game_id} error: {str(e)}")
-        finally:
-            print(f"Game {self.game_id} ended")
-
-    def handle_game_full(self, event):
-        """Handle initial game state from 'gameFull' event"""
-        # Handle Lichess' special 'startpos' notation
-        initial_fen = event.get('initialFen', chess.STARTING_FEN)
-        if initial_fen == "startpos":
-            initial_fen = chess.STARTING_FEN  # Convert to proper FEN
-
-        self.board = chess.Board(initial_fen)
-
-        # Apply any existing moves
-        moves_uci = event['state']['moves'].split()
-        for move_uci in moves_uci:
-            self.board.push_uci(move_uci)
-
-        print(f"Initial position: {self.board.fen()}")
-        self.check_and_make_move()
-
-    def handle_game_state(self, state):
-        """Process ongoing game state updates"""
-        # Handle FEN or startpos
-        if 'fen' in state:
-            fen = state['fen']
-            if fen == "startpos":
-                fen = chess.STARTING_FEN
-            self.board.set_fen(fen)
-        else:
-            # Fallback to move list reconstruction
-            self.board.reset()
-            moves_uci = state['moves'].split()
-            for move_uci in moves_uci:
-                self.board.push_uci(move_uci)
-
-        print(f"Updated position: {self.board.fen()}")
-        self.check_and_make_move()
-
-    def check_and_make_move(self):
-        """Check if it's our turn and make a move if needed"""
-        print(f"Current turn: {'white' if self.board.turn else 'black'} | Our color: {self.color}")
-        if self.should_move():
-            print("It's our turn! Choosing move...")
-            move = self.choose_move()
-            self.make_move(move)
-        else:
-            print("Not our turn")
-
-    def should_move(self):
-        """Check if it's our turn to move (FIXED)"""
-        # Convert 'white'/'black' to chess.WHITE/chess.BLACK comparison
-        return (self.color == 'white' and self.board.turn == chess.WHITE) or \
-            (self.color == 'black' and self.board.turn == chess.BLACK)
-
-    def choose_move(self):
-        state_np = board_to_tensor(self.board)
-        state_tensor = torch.from_numpy(state_np).unsqueeze(0).float().to(device)
-
-        legal_moves = [move.uci() for move in self.board.legal_moves]
-        legal_indices = [move_vocab[m] for m in legal_moves if m in move_vocab]
-
-        if not legal_indices:
-            return self.random_legal_move()
-
-        with torch.no_grad():
-            outputs = model(state_tensor)
-            mask = torch.ones_like(outputs) * float('-inf')
-            mask[:, legal_indices] = 0
-            masked_outputs = outputs + mask
-
-            # Apply temperature (e.g., 0.5 for more exploration)
-            temperature = 0.5
-            probs = torch.softmax(masked_outputs / temperature, dim=1)
-            move_idx = torch.multinomial(probs, 1).item()
-
-        uci_move = inv_move_vocab.get(move_idx, '0000')
-
-        if uci_move in legal_moves:
-            return uci_move
-        return self.random_legal_move()
-    def random_legal_move(self):
-        print("random move")
-        """Fallback move selection with safety checks"""
-        legal_moves = [m.uci() for m in self.board.legal_moves]
-
-        if not legal_moves:
-            if self.board.is_checkmate():
-                print("Checkmate - resigning")
+            # Positional value using correct piece-square table
+            pst = piece_square_tables.get(piece.symbol(), [[0] * 8] * 8)
+            rank, file = divmod(square, 8)
+            if piece.color == chess.WHITE:
+                pos_score_white += pst[rank][file]
             else:
-                print("Stalemate - game drawn")
-            return "resign"
+                pos_score_black += pst[rank][file]
 
-        return np.random.choice(legal_moves)
+            # King safety evaluations
+            if piece.piece_type == chess.KING:
+                if piece.color == chess.WHITE:
+                    white_king_safety = king_safety(board, square, chess.WHITE)
+                else:
+                    black_king_safety = king_safety(board, square, chess.BLACK)
 
-    def make_move(self, move):
-        """Send move to Lichess"""
-        try:
-            client.bots.make_move(self.game_id, move)
-            print(f"Game {self.game_id} made move: {move}")
-        except berserk.exceptions.ResponseError as e:
-            print(f"Move error in {self.game_id}: {str(e)}")
+    # Evaluate pawn structures separately
+    pawn_structure_score += evaluate_pawn_structure(board, chess.WHITE)
+    pawn_structure_score -= evaluate_pawn_structure(board, chess.BLACK)
 
-    def stop(self):
-        self.running = False
-
-
-def handle_incoming_events():
-    """Main event loop for challenges and game starts"""
-    while True:
-        try:
-            for event in client.bots.stream_incoming_events():
-                print(f"Received event: {event['type']}")
-
-                if event['type'] == 'challenge':
-                    handle_challenge(event)
-                elif event['type'] == 'gameStart':
-                    start_game(event)
-                elif event['type'] == 'gameFinish':
-                    pass  # Handle game completion if needed
-
-        except Exception as e:
-            print(f"Event stream error: {str(e)}")
-            time.sleep(5)
-
-
-def handle_challenge(challenge):
-    """Challenge response logic"""
-    challenge_id = challenge['challenge']['id']
-
-    # Accept all standard challenges
-    if challenge['challenge']['variant']['key'] == 'standard':
-        client.bots.accept_challenge(challenge_id)
-        print(f"Accepted challenge {challenge_id}")
+    # Adjust king safety perspective
+    if is_white:
+        king_safety_score = white_king_safety - black_king_safety
     else:
-        client.bots.decline_challenge(challenge_id)
-        print(f"Declined challenge {challenge_id}")
+        king_safety_score = black_king_safety - white_king_safety
+
+    # Total evaluation score
+    positional_score = pos_score_white + pos_score_black
+    total_score = material_score + positional_score/4# + king_safety_score
+
+    # Debugging output
+    #print(f"White Positional Score: {pos_score_white}")
+    #print(f"Black Positional Score: {pos_score_black}")
+    #print(f"Positional Score Difference: {positional_score}")
+    #print(f"Total Evaluation Score: {total_score}")
+
+    # Return the evaluation from the bot's perspective
+    return total_score if is_white else -total_score
 
 
-def start_game(event):
-    """Start a new game thread"""
-    game_id = event['game']['id']
-    color = event['game']['color']
+def minimax(board, depth, alpha, beta, maximizing_player, is_white):
+    """
+    Minimax algorithm with alpha-beta pruning.
+    """
+    if depth == 0 or board.is_game_over():
+        return evaluate_board(board, is_white)
 
-    print(f"Starting game {game_id} as {color}")
-    game = GameHandler(game_id, color)
-    game.start()
+    legal_moves = list(board.legal_moves)
+    # Prioritize moves that give check or are captures
+    legal_moves.sort(key=lambda move: board.gives_check(move) or board.is_capture(move), reverse=True)
 
-print("Move vocab size:", len(move_vocab))
-print("Model output size:", model.fc_layers[-1].out_features)
+    if maximizing_player:
+        max_eval = float('-inf')
+        for move in legal_moves:
+            board.push(move)
+            score = minimax(board, depth - 1, alpha, beta, False, is_white)
+            board.pop()
+            max_eval = max(max_eval, score)
+            alpha = max(alpha, score)
+            if beta <= alpha:
+                break
+        return max_eval
+    else:
+        min_eval = float('inf')
+        for move in legal_moves:
+            board.push(move)
+            score = minimax(board, depth - 1, alpha, beta, True, is_white)
+            board.pop()
+            min_eval = min(min_eval, score)
+            beta = min(beta, score)
+            if beta <= alpha:
+                break
+        return min_eval
 
-if __name__ == "__main__":
-    print("Bot starting...")
-    handle_incoming_events()
+
+def get_best_move(board, is_white, depth=2):
+    """
+    Determines the best move using the minimax algorithm.
+    """
+    legal_moves = list(board.legal_moves)
+    best_eval = float('-inf') if is_white else float('inf')
+    best_move = None
+
+    for move in legal_moves:
+        board.push(move)
+        evaluation = minimax(board, depth - 1, float('-inf'), float('inf'), False, is_white)
+        board.pop()
+
+        if is_white and evaluation > best_eval:
+            best_eval = evaluation
+            best_move = move
+        elif not is_white and evaluation < best_eval:
+            best_eval = evaluation
+            best_move = move
+
+    logging.info(f'Best move determined: {best_move}, Evaluation: {best_eval}')
+    return best_move
+
+def handle_game(game_id):
+    """
+    Processes a game stream by handling incoming events.
+    """
+    logging.info(f'Handling game {game_id}')
+    stream = client.bots.stream_game_state(game_id)
+    board = chess.Board()
+    is_white = None
+
+    # Get your account ID once for reuse
+    account_id = client.account.get()['id']
+
+    for event in stream:
+        logging.debug(f'Received event: {event}')
+        if event['type'] == 'gameFull':
+            moves = event['state']['moves']
+            if moves:
+                for move in moves.split():
+                    board.push_uci(move)
+            # Determine your color based on account ID
+            if event['white']['id'] == account_id:
+                is_white = True
+                color = 'white'
+            else:
+                is_white = False
+                color = 'black'
+
+            logging.info(f'Playing as {color}')
+            if board.turn == is_white and not board.is_game_over():
+                best_move = get_best_move(board, is_white)
+                if best_move:
+                    try:
+                        client.bots.make_move(game_id, best_move.uci())
+                    except requests.exceptions.HTTPError as e:
+                        logging.error(f'HTTP error making move: {e}')
+                    except requests.exceptions.RequestException as e:
+                        logging.error(f'Request error making move: {e}')
+
+        elif event['type'] == 'gameState':
+            moves = event['moves']
+            board = chess.Board()
+            if moves:
+                for move in moves.split():
+                    board.push_uci(move)
+            if board.turn == is_white and not board.is_game_over():
+                best_move = get_best_move(board, is_white)
+                if best_move:
+                    try:
+                        client.bots.make_move(game_id, best_move.uci())
+                    except requests.exceptions.HTTPError as e:
+                        logging.error(f'HTTP error making move: {e}')
+                    except requests.exceptions.RequestException as e:
+                        logging.error(f'Request error making move: {e}')
+
+        elif event['type'] == 'chatLine':
+            logging.info(f'Chat message from {event.get("username", "Unknown")}: {event.get("text", "")}')
+
+def should_accept(event):
+    """
+    Determines whether to accept an incoming challenge.
+    """
+    return True
+
+def signal_handler(sig, frame):
+    logging.info('Exiting...')
+    sys.exit(0)
+
+def main():
+    signal.signal(signal.SIGINT, signal_handler)
+    logging.info('Bot is running. Waiting for events...')
+    for event in client.bots.stream_incoming_events():
+        logging.debug(f'Incoming event: {event}')
+        if event['type'] == 'challenge':
+            if should_accept(event):
+                client.bots.accept_challenge(event['challenge']['id'])
+                logging.info(f'Accepted challenge {event["challenge"]["id"]}')
+            else:
+                client.bots.decline_challenge(event['challenge']['id'])
+                logging.info(f'Declined challenge {event["challenge"]["id"]}')
+        elif event['type'] == 'gameStart':
+            game_id = event['game']['id']
+            logging.info(f'Starting game {game_id}')
+            handle_game(game_id)
+
+if __name__ == '__main__':
+    main()
