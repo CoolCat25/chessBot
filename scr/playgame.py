@@ -1,3 +1,5 @@
+import random
+import chess.polyglot
 import berserk
 import chess
 import time
@@ -340,10 +342,36 @@ def minimax(board, depth, alpha, beta, maximizing_player, is_white):
         return min_eval
 
 
-def get_best_move(board, is_white, depth=2):
+def get_best_move(board, is_white, depth=3):
     """
-    Determines the best move using the minimax algorithm.
+    Determines the best move using opening book when available, otherwise uses minimax.
     """
+    # Use opening book for the first 12 moves (24 plies)
+    if board.ply() < 24:
+        try:
+            with chess.polyglot.open_reader("human.bin") as reader:
+                entries = list(reader.find_all(board))
+                if entries:
+                    # Weighted random selection based on entry frequency
+                    total_weight = sum(entry.weight for entry in entries)
+                    selected = random.uniform(0, total_weight)
+                    cumulative = 0
+
+                    for entry in entries:
+                        cumulative += entry.weight
+                        if selected <= cumulative:
+                            chosen_move = entry.move
+                            # Verify the move is legal
+                            if chosen_move in board.legal_moves:
+                                logging.info(f'Using opening book move: {chosen_move.uci()}')
+                                return chosen_move
+                            break
+        except FileNotFoundError:
+            logging.error("Opening book file 'human.bin' not found.")
+        except Exception as e:
+            logging.error(f'Error reading opening book: {e}')
+
+    # Fallback to minimax if no book move found
     legal_moves = list(board.legal_moves)
     best_eval = float('-inf') if is_white else float('inf')
     best_move = None
@@ -360,7 +388,7 @@ def get_best_move(board, is_white, depth=2):
             best_eval = evaluation
             best_move = move
 
-    logging.info(f'Best move determined: {best_move}, Evaluation: {best_eval}')
+    logging.info(f'Best engine move: {best_move.uci() if best_move else "None"}, Evaluation: {best_eval}')
     return best_move
 
 def handle_game(game_id):
