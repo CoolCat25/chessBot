@@ -10,19 +10,17 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-# Configure logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Initialize the session with your API token
-API_TOKEN = "lip_CpEAd1KdD5ypRmRUc3Q8"  # Replace this token with an environment variable or config
+
+API_TOKEN = "lip_CpEAd1KdD5ypRmRUc3Q8"  
 session = berserk.TokenSession(API_TOKEN)
 
-# Define your retry strategy
 retry_strategy = Retry(
     total=3,              # Total number of retries
-    backoff_factor=0.1,   # Backoff factor between attempts
-    allowed_methods=frozenset(['GET', 'POST']),  # Methods to retry
-    status_forcelist=[500, 502, 503, 504],         # HTTP status codes to retry
+    backoff_factor=0.1,  
+    allowed_methods=frozenset(['GET', 'POST']),  
+    status_forcelist=[500, 502, 503, 504],         
     raise_on_redirect=True,
     raise_on_status=True
 )
@@ -33,15 +31,12 @@ session.mount("http://", adapter)
 
 client = berserk.Client(session=session)
 
-# Piece values for evaluation
 piece_values = {
     'P': 1, 'N': 3, 'B': 3, 'R': 5, 'Q': 9, 'K': 0,
     'p': -1, 'n': -3, 'b': -3, 'r': -5, 'q': -9, 'k': 0,
 }
 
-# Piece-Square Tables (values in centipawns)
 
-# White Piece-Square Tables
 pawn_pst_white = [
     [0,   0,   0,   0,   0,   0,   0,  0],
     [1,   1,   1,   1,   1,   1,   1,  1],
@@ -107,8 +102,6 @@ king_pst_white = [
     [-0.2, 0,    0.1,  0.1,  0.1,  0.1,  0,   -0.2],
     [-0.4, -0.2, -0.2, -0.2, -0.2, -0.2, -0.2, -0.4]
 ]
-# Black Piece-Square Tables
-# Black Piece-Square Tables (Inverted)
 
 pawn_pst_black = [
     [0,   0,   0,   0,   0,   0,   0,   0],
@@ -193,20 +186,17 @@ piece_square_tables = {
 }
 
 def king_safety(board, king_square, color):
-    """
-    Evaluates the safety of the king based on pawn shields.
-    """
+
     safety_score = 0
     file = chess.square_file(king_square)
     rank = chess.square_rank(king_square)
 
-    # Pawn shield evaluation parameters
     pawn_shield_bonus = 0.5
-    pawn_penalty = -1  # Enemy pawn presence near the king is bad
+    pawn_penalty = -1  
 
     # Evaluate adjacent pawns for pawn shield
-    for rank_offset in range(1, 3):  # Check up to two ranks ahead
-        for file_offset in [-1, 0, 1]:  # Check left, center, and right files
+    for rank_offset in range(1, 3):  
+        for file_offset in [-1, 0, 1]:  
             new_file = file + file_offset
             new_rank = rank + (rank_offset if color == chess.WHITE else -rank_offset)
             if 0 <= new_file < 8 and 0 <= new_rank < 8:
@@ -215,9 +205,9 @@ def king_safety(board, king_square, color):
                 if piece:
                     if piece.piece_type == chess.PAWN:
                         if piece.color == color:
-                            safety_score += pawn_shield_bonus  # Own pawn is good
+                            safety_score += pawn_shield_bonus  
                         else:
-                            safety_score += pawn_penalty  # Enemy pawn is bad
+                            safety_score += pawn_penalty  
 
     return safety_score
 
@@ -230,13 +220,11 @@ def evaluate_pawn_structure(board, color):
     pawns = board.pieces(chess.PAWN, color)
     pawn_files = [chess.square_file(p) for p in pawns]
 
-    # Penalize doubled pawns
     for f in set(pawn_files):
         count = pawn_files.count(f)
         if count > 1:
             score -= 1.5 * (count - 1)
 
-    # Penalize isolated pawns: check if adjacent files are missing any pawn
     for f in pawn_files:
         if (f - 1) not in pawn_files and (f + 1) not in pawn_files:
             score -= 2
@@ -265,10 +253,8 @@ def evaluate_board(board, is_white):
     for square in chess.SQUARES:
         piece = board.piece_at(square)
         if piece:
-            # Material value (already signed)
             material_score += piece_values.get(piece.symbol(), 0)
 
-            # Positional value using correct piece-square table
             pst = piece_square_tables.get(piece.symbol(), [[0] * 8] * 8)
             rank, file = divmod(square, 8)
             if piece.color == chess.WHITE:
@@ -276,7 +262,6 @@ def evaluate_board(board, is_white):
             else:
                 pos_score_black += pst[rank][file]
 
-            # King safety evaluations
             if piece.piece_type == chess.KING:
                 if piece.color == chess.WHITE:
                     white_king_safety = king_safety(board, square, chess.WHITE)
@@ -303,7 +288,6 @@ def evaluate_board(board, is_white):
     #print(f"Positional Score Difference: {positional_score}")
     #print(f"Total Evaluation Score: {total_score}")
 
-    # Return the evaluation from the bot's perspective
     return total_score if is_white else -total_score
 
 
@@ -371,7 +355,6 @@ def get_best_move(board, is_white, depth=3):
         except Exception as e:
             logging.error(f'Error reading opening book: {e}')
 
-    # Fallback to minimax if no book move found
     legal_moves = list(board.legal_moves)
     best_eval = float('-inf') if is_white else float('inf')
     best_move = None
@@ -400,7 +383,6 @@ def handle_game(game_id):
     board = chess.Board()
     is_white = None
 
-    # Get your account ID once for reuse
     account_id = client.account.get()['id']
 
     for event in stream:
@@ -410,7 +392,6 @@ def handle_game(game_id):
             if moves:
                 for move in moves.split():
                     board.push_uci(move)
-            # Determine your color based on account ID
             if event['white']['id'] == account_id:
                 is_white = True
                 color = 'white'
@@ -449,9 +430,7 @@ def handle_game(game_id):
             logging.info(f'Chat message from {event.get("username", "Unknown")}: {event.get("text", "")}')
 
 def should_accept(event):
-    """
-    Determines whether to accept an incoming challenge.
-    """
+
     return True
 
 def signal_handler(sig, frame):
