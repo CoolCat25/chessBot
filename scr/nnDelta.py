@@ -92,14 +92,11 @@ class LichessEvalDataset(Dataset):
 
 
 def main():
-    # --- CUDA Integration ---
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # --- Training Setup ---
     dataset = LichessEvalDataset("lichess_db_eval.jsonl.zst", max_positions=200000)
 
-    # Configure DataLoader with 8 workers
     dataloader = DataLoader(
         dataset,
         batch_size=32,
@@ -114,7 +111,6 @@ def main():
         move_vocab = json.load(f)
     num_moves = len(move_vocab)
 
-    # --- Model Definition ---
 
     class SEBlock(nn.Module):
         def __init__(self, channels, reduction=16):
@@ -170,13 +166,12 @@ def main():
             x = self.fc_layers(x)
             return x
 
-        # --- Data Processing ---
 
     model = ChessResNet(num_moves).to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=0.001)
 
-    # --- Training Loop ---
+    # Training Loop
     num_epochs = 50
     for epoch in range(num_epochs):
         running_loss = 0.0
